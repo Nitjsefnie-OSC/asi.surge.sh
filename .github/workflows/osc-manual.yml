@@ -1,0 +1,117 @@
+# OSC fork CI wrapper — dispatch with `target_ref` to test any branch.
+# Jobs are copied verbatim from the repository's own PR-path jobs:
+#   - .github/workflows/token-ci.yml job `test` (pull_request -> main)
+#   - .github/workflows/validate-design.yml job `validate` (on: [push, pull_request])
+# DELIBERATELY EXCLUDED (loud skip, add verbatim before a probe that needs them):
+#   - wind-v2-verification.yml `verify-wind-v2`: path-filtered
+#     (cad_and_blender/openscad/wind/v2.0/**, scripts/test_wind_v2.sh, its own
+#     workflow file); a ref touching none of those paths gets no upstream run
+#     either, so excluding it matches upstream's PR behavior for such refs.
+#   - CodeQL: not in any committed workflow (default setup); a fork cannot run
+#     it through this wrapper.
+# This file is intentionally not sent upstream.
+name: OSC manual CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'Git branch, tag, or 40-character commit SHA to validate'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osc-manual-${{ github.repository }}-${{ inputs.target_ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Token Contract Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_ref }}
+
+      - name: Provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "tested_target_ref=${{ inputs.target_ref }}"
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile contracts
+        run: npx hardhat compile
+
+      - name: Run tests
+        run: npx hardhat test
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contracts-artifacts
+          path: artifacts/
+
+  validate:
+    name: Validate AMU Design
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.target_ref }}
+
+      - name: Provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "tested_target_ref=${{ inputs.target_ref }}"
+          checked_out_sha="$(git rev-parse HEAD)"
+          if [[ ! "$checked_out_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::git rev-parse HEAD did not produce a 40-character commit SHA: $checked_out_sha"
+            exit 1
+          fi
+          printf 'checked-out SHA: %s\n' "$checked_out_sha"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Validate AMU Design
+        run: node scripts/validate-design.js
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IPFS_API_KEY: ${{ secrets.IPFS_API_KEY }}
+
+      - name: Upload validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-results
+          path: |
+            validation-reports/
+            test-results/
+            logs/
